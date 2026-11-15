@@ -18,8 +18,9 @@
 // drives), and the fully-resolved real path - symlinks followed - must stay
 // inside the root again, so a link planted in the tree cannot read past it.
 import { readdir, lstat, stat, rm, rename, mkdir, readFile, realpath, readlink } from 'node:fs/promises'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, mkdirSync } from 'node:fs'
 import { join, resolve as resolvePath, sep, dirname, basename } from 'node:path'
+import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 
 /** Cordis plugin name. */
@@ -29,11 +30,9 @@ export const name = 'dsh-artifacts'
 export const inject = ['connection']
 
 /** The user's deliverables folder, following the harness-wide rule for new artifacts. */
-const DEFAULT_ROOT = 'F:\\desktop\\草稿文件\\dsh产物'
 
 /** One listing never answers with more rows than this. */
 const MAX_ENTRIES = 2000
-
 /** One search answers with at most this many matches. */
 const MAX_SEARCH_RESULTS = 200
 
@@ -152,14 +151,48 @@ function rethrowMapped(error) {
   throw new ArtifactsError(500, 'internal', error instanceof Error ? error.message : String(error))
 }
 
-/** The configured root, falling back sensibly when the default is missing. */
-function rootOf(config) {
+/**
+ * Where the artifacts root comes from, and where it is.
+ *
+ * Priority: the row's `config.root` (set through the panel's settings dialog,
+ * which persists via the config editor, or by hand in the patch layer), then
+ * the `DSH_ARTIFACTS_ROOT` environment variable, then a per-user default below
+ * the DSH home that is safe on every machine — never any author's own paths.
+ */
+function rootResolution(config) {
   const configured = config !== null && typeof config === 'object' && typeof config.root === 'string' && config.root.trim() !== ''
     ? config.root.trim()
     : undefined
-  if (configured !== undefined) return resolvePath(configured)
-  if (existsSync(DEFAULT_ROOT)) return DEFAULT_ROOT
-  return resolvePath(process.env.DSH_ARTIFACTS_ROOT || process.env.USERPROFILE || process.env.HOME || '.')
+  if (configured !== undefined) return { root: resolvePath(configured), source: 'config' }
+  const fromEnv = process.env.DSH_ARTIFACTS_ROOT
+  if (fromEnv !== undefined && fromEnv.trim() !== '') return { root: resolvePath(fromEnv.trim()), source: 'env' }
+  return { root: join(homedir(), '.dsh', 'artifacts'), source: 'default' }
+}
+
+/** The configured root, falling back sensibly when the default is missing. */
+function rootOf(config) {
+  return rootResolution(config).root
+}
+
+/** Whether a path is fully qualified (absolute) on this platform. */
+function isFullyQualified(candidate) {
+  return /^[/\\]/u.test(candidate) || /^[a-zA-Z]:[/\\]/u.test(candidate)
+}
+
+/**
+ * Persist a new artifacts root through the config editor — the documented way
+ * for a plugin to change its own configuration. Returns the saved root.
+ */
+async function saveRoot(ctx, root) {
+  const entry = ctx.fiber?.entry
+  const editor = ctx.get('configEditor')
+  if (entry === undefined || editor === undefined) {
+    throw new ArtifactsError(500, 'config-editor-unavailable', 'configuration cannot be saved in this profile; set root in the patch layer instead')
+  }
+  const saved = await editor.edit(entry, (current) => ({ ...(current ?? {}), root }))
+  return saved !== null && typeof saved === 'object' && typeof saved.root === 'string' && saved.root.trim() !== ''
+    ? resolvePath(saved.root.trim())
+    : root
 }
 
 /**
@@ -494,7 +527,17 @@ export function apply(ctx, config = {}) {
   if (connection === undefined || connection.fetch === undefined || typeof connection.fetch.register !== 'function') {
     throw new Error('dsh-artifacts: the connection service is required to serve the artifacts routes')
   }
-  const root = rootOf(config)
+  const { root, source } = rootResolution(config)
+  // The auto default and the environment variable are ours to create; a
+  // configured root is the user's own decision and a missing one must surface
+  // as a visible error instead (a typo must not silently grow a folder).
+  if ((source === 'default' || source === 'env') && !existsSync(root)) {
+    try {
+      mkdirSync(root, { recursive: true })
+    } catch {
+      /* the listing route reports the unreadable root with its path */
+    }
+  }
 
   const disposers = []
   const register = (route) => {
@@ -569,6 +612,37 @@ export function apply(ctx, config = {}) {
           return fail(500, 'root-unreadable', `the artifacts root is not readable: ${root}`)
         }
         return json(await searchNames(root, query, limit))
+      } catch (error) {
+        return errorResponse(error)
+      }
+    },
+  })
+
+  register({
+    path: '/api/dsh-artifacts.config',
+    methods: ['GET', 'HEAD', 'POST'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      try {
+        if (request.method === 'POST') {
+          const body = await readJsonBody(request)
+          const requested = typeof body.root === 'string' ? body.root.trim() : ''
+          if (requested === '' || !isFullyQualified(requested)) {
+            throw new ArtifactsError(400, 'invalid-root', 'the artifacts root must be a fully qualified absolute path')
+          }
+          const resolved = resolvePath(requested)
+          if (!existsSync(resolved)) {
+            try {
+              mkdirSync(resolved, { recursive: true })
+            } catch (error) {
+              rethrowMapped(error)
+            }
+          }
+          const saved = await saveRoot(ctx, resolved)
+          return json({ ok: true, root: saved })
+        }
+        if (request.method === 'HEAD') return new Response(null, { status: 200 })
+        return json({ ok: true, root, source, exists: existsSync(root) })
       } catch (error) {
         return errorResponse(error)
       }

@@ -88,6 +88,18 @@ window.__ModuleLoader__.load({
       'notice.deleted': '已删除 {name}',
       'notice.opened': '已调用系统打开',
       'notice.revealed': '已在资源管理器中显示',
+      'notice.rootSaved': '产物目录已保存：{root}',
+      'notice.rootApplied': '已切换到新目录（等待生效…）',
+      'settings.title': '产物目录设置',
+      'settings.current': '当前目录',
+      'settings.pick': '选择目录…',
+      'settings.pick.unavailable': '系统目录选择器不可用，请手动输入完整路径',
+      'settings.manual': '或手动输入完整路径',
+      'settings.placeholder': '例如 D:\\我的产物',
+      'settings.save': '保存并切换',
+      'settings.hint': '保存后立即生效；目录不存在时会自动创建',
+      'error.rootSaved': '保存失败：{message}',
+      'error.rootAbsolute': '请输入完整路径（如 D:\\我的产物 或 /home/me/产物）',
       'error.invalid-name.local': '名称含有本机不允许的字符',
       'error.generic': '操作失败：{message}',
       'error.search.unavailable': '搜索暂不可用（路由缺失），请重启 DSH 后重试',
@@ -163,6 +175,18 @@ window.__ModuleLoader__.load({
       'notice.deleted': 'Deleted {name}',
       'notice.opened': 'Handed to the system',
       'notice.revealed': 'Shown in the file manager',
+      'notice.rootSaved': 'Artifacts folder saved: {root}',
+      'notice.rootApplied': 'Switched to the new folder (waiting for it to apply…)',
+      'settings.title': 'Artifacts folder',
+      'settings.current': 'Current folder',
+      'settings.pick': 'Choose folder…',
+      'settings.pick.unavailable': 'The system folder picker is unavailable; type a full path instead',
+      'settings.manual': 'Or type a full path',
+      'settings.placeholder': 'e.g. D:\\My Artifacts or /home/me/artifacts',
+      'settings.save': 'Save and switch',
+      'settings.hint': 'Applies immediately; a missing folder is created',
+      'error.rootSaved': 'Saving failed: {message}',
+      'error.rootAbsolute': 'Enter a fully qualified path (e.g. D:\\My Artifacts or /home/me/artifacts)',
       'error.invalid-name.local': 'The name uses characters this machine does not allow',
       'error.generic': 'The operation failed: {message}',
       'error.search.unavailable': 'Search is unavailable (route missing); restart DSH and try again',
@@ -331,6 +355,34 @@ window.__ModuleLoader__.load({
       return body
     }
 
+    /** Current artifacts-root configuration, as the host resolves it. */
+    async function fetchConfig() {
+      const response = await fetch(new URL(`${API}.config`, window.location.origin), { method: 'GET' })
+      const body = await response.json().catch(() => undefined)
+      if (!response.ok || body?.ok !== true) {
+        const error = new Error(body?.error ?? `HTTP ${response.status}`)
+        error.code = body?.code
+        throw error
+      }
+      return body
+    }
+
+    /** Persist a new artifacts root; the host restarts the plugin with it. */
+    async function postConfig(root) {
+      const response = await fetch(new URL(`${API}.config`, window.location.origin), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root }),
+      })
+      const body = await response.json().catch(() => undefined)
+      if (!response.ok || body?.ok !== true) {
+        const error = new Error(body?.error ?? `HTTP ${response.status}`)
+        error.code = body?.code
+        throw error
+      }
+      return body
+    }
+
     /**
      * Fallback search: breadth-first walk over the `.list` route.
      *
@@ -410,7 +462,7 @@ window.__ModuleLoader__.load({
 .dsha-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .dsha-title{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:600;letter-spacing:.2px}
 .dsha-title-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#6366f1 0%,#ec4899 55%,#f59e0b 110%);display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 2px 8px rgba(99,102,241,.35)}
-.dsha-subtitle{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:400}
+.dsha-subtitle{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:400;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsha-header-actions{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
 .dsha-stats{color:var(--dsw-alias-label-tertiary);font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .dsha-stat-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1)}
@@ -836,6 +888,74 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // --- settings modal -----------------------------------------------------------
+
+    /** Change the artifacts root: system picker or a typed full path. */
+    function SettingsModal({ rootInfo, t, onPick, onSave, onDismiss }) {
+      const [value, setValue] = useState(rootInfo?.root ?? '')
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(null)
+      const inputRef = useRef(null)
+      useEffect(() => { inputRef.current?.focus() }, [])
+      const pick = async () => {
+        setError(null)
+        try {
+          const picked = await onPick()
+          if (picked !== null && picked !== undefined && picked !== '') setValue(picked)
+        } catch (cause) {
+          setError(t('settings.pick.unavailable'))
+        }
+      }
+      const save = async () => {
+        const trimmed = value.trim()
+        if (trimmed === '' || busy) return
+        if (!/^[/\\]/u.test(trimmed) && !/^[a-zA-Z]:[/\\]/u.test(trimmed)) {
+          setError(t('error.rootAbsolute'))
+          return
+        }
+        setBusy(true)
+        setError(null)
+        try {
+          const saved = await onSave(trimmed)
+          setBusy(false)
+          return saved // handed back through onSave's own completion path
+        } catch (cause) {
+          setBusy(false)
+          setError(interpolate(t('error.rootSaved'), { message: cause instanceof Error ? cause.message : String(cause) }))
+        }
+      }
+      return jsx(Modal, {
+        title: `⚙ ${t('settings.title')}`,
+        onDismiss,
+        children: jsxs(Fragment, {
+          children: [
+            jsxs('div', { className: 'dsha-modal-body', children: [
+              `${t('settings.current')}: `,
+              jsx('span', { style: { 'font-family': 'ui-monospace, Menlo, Consolas, monospace', 'word-break': 'break-all' }, children: rootInfo?.root ?? '…' }),
+              rootInfo?.source !== undefined ? jsx('span', { className: 'dsha-row-kind', children: rootInfo.source }) : null,
+            ] }),
+            jsx('button', { className: 'dsha-btn', onClick: () => void pick(), children: `📂 ${t('settings.pick')}` }),
+            jsx('div', { className: 'dsha-modal-body', children: t('settings.manual') }),
+            jsx('input', {
+              ref: inputRef,
+              className: 'dsha-modal-input',
+              value,
+              placeholder: t('settings.placeholder'),
+              'aria-label': t('settings.title'),
+              onChange: (event) => setValue(event.target.value),
+              onKeyDown: (event) => { if (event.key === 'Enter') void save() },
+            }),
+            error !== null ? jsx('div', { className: 'dsha-modal-body dsha-error', children: error }) : null,
+            jsx('div', { className: 'dsha-modal-body', children: t('settings.hint') }),
+            jsxs('div', { className: 'dsha-modal-actions', children: [
+              jsx('button', { className: 'dsha-btn', onClick: onDismiss, children: t('action.cancel') }),
+              jsx('button', { className: 'dsha-btn dsha-btn-primary', disabled: busy, onClick: () => void save(), children: busy ? `… ${t('action.working')}` : `💾 ${t('settings.save')}` }),
+            ] }),
+          ],
+        }),
+      })
+    }
+
     // --- sidebar icon ----------------------------------------------------------------
 
     function PanelIcon(props) {
@@ -880,11 +1000,12 @@ window.__ModuleLoader__.load({
     // --- main panel -------------------------------------------------------------------
 
     function ArtifactsPanel(props) {
-      const { t } = props
+      const { t, pickDirectory } = props
       const [path, setPath] = useState('')
       const [listing, setListing] = useState(null)
       const [loading, setLoading] = useState(true)
       const [error, setError] = useState(null)
+      const [rootInfo, setRootInfo] = useState(null)
       const [view, setView] = useState(() => {
         try { return window.localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'card' } catch { return 'card' }
       })
@@ -944,6 +1065,41 @@ window.__ModuleLoader__.load({
       }, [t])
 
       useEffect(() => { void load('') }, [load])
+
+      // Where the artifacts root is and where it comes from, for the subtitle
+      // and the settings dialog.
+      useEffect(() => {
+        let alive = true
+        fetchConfig()
+          .then((info) => { if (alive) setRootInfo({ root: info.root, source: info.source, exists: info.exists }) })
+          .catch(() => { /* the header still works; the dialog shows the failure */ })
+        return () => { alive = false }
+      }, [])
+
+      /** Save a new root and wait until the restarted host serves it. */
+      const saveRoot = useCallback(async (value) => {
+        const saved = await postConfig(value)
+        showToast(interpolate(t('notice.rootSaved'), { root: saved.root }))
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          await new Promise((resolve) => { window.setTimeout(resolve, 400) })
+          try {
+            const info = await fetchConfig()
+            if (info.root === saved.root) {
+              setRootInfo({ root: info.root, source: info.source, exists: info.exists })
+              break
+            }
+          } catch {
+            // the plugin is restarting; keep polling
+          }
+        }
+        setDialog(null)
+        setFilter('')
+        setSearch(null)
+        setPath('')
+        pathRef.current = ''
+        void load('')
+        return saved.root
+      }, [t, showToast, load])
 
       // The search box: debounced whole-tree name search, replacing the body
       // while a query is active; emptying it returns to the directory view.
@@ -1061,6 +1217,10 @@ window.__ModuleLoader__.load({
         setDialog({ kind: 'mkdir' })
       }, [])
 
+      const askSettings = useCallback(() => {
+        setDialog({ kind: 'settings' })
+      }, [])
+
       const dismissDialog = useCallback(() => setDialog(null), [])
 
       const confirmDialog = useCallback(async (value) => {
@@ -1111,9 +1271,10 @@ window.__ModuleLoader__.load({
             jsx('span', { className: 'dsha-title-mark', children: '🗂️' }),
             jsxs('span', { className: 'dsha-title', children: [
               t('panel.title'),
-              jsx('span', { className: 'dsha-subtitle', children: t('panel.subtitle') }),
+              jsx('span', { className: 'dsha-subtitle', title: rootInfo?.root ?? '', children: rootInfo?.root !== undefined ? `${t('panel.subtitle')} · ${rootInfo.root}` : t('panel.subtitle') }),
             ] }),
             jsxs('div', { className: 'dsha-header-actions', children: [
+              jsx('button', { className: 'dsha-btn', onClick: askSettings, title: t('settings.title'), 'aria-label': t('settings.title'), children: '⚙' }),
               jsx('button', { className: 'dsha-btn', onClick: askMkdir, children: `📁 ${t('action.mkdir')}` }),
               jsx('button', { className: 'dsha-btn', onClick: () => void load(pathRef.current), disabled: loading, children: `⟳ ${t('action.refresh')}` }),
               jsx('div', { className: 'dsha-segment', role: 'group', 'aria-label': t('panel.view'), children: [
@@ -1130,7 +1291,7 @@ window.__ModuleLoader__.load({
             jsxs('div', { className: 'dsha-crumbs', children: [
               jsx('button', {
                 className: 'dsha-crumb', 'data-current': path === '', onClick: () => navigate(''),
-                children: `🏠 ${t('crumb.root')}`,
+                title: rootInfo?.root ?? '', children: `🏠 ${t('crumb.root')}`,
               }),
               crumbs.map((crumb) => jsxs(Fragment, { children: [
                 jsx('span', { className: 'dsha-crumb-sep', children: '›' }),
@@ -1218,6 +1379,7 @@ window.__ModuleLoader__.load({
                 jsx('div', { className: 'dsha-empty-emoji', children: '🌈' }),
                 jsx('div', { className: 'dsha-empty-title', children: t('empty.title') }),
                 jsx('div', { className: 'dsha-empty-hint', children: t('empty.hint') }),
+                rootInfo?.root !== undefined ? jsx('div', { className: 'dsha-empty-hint', title: rootInfo.root, children: `📂 ${rootInfo.root}` }) : null,
               ] })
             }
             return jsxs(Fragment, {
@@ -1258,6 +1420,13 @@ window.__ModuleLoader__.load({
           title: `📁 ${t('mkdir.title')}`, label: t('mkdir.label'), initial: '',
           confirmLabel: t('action.confirm'), onConfirm: confirmDialog, onDismiss: dismissDialog,
         }) : null,
+        dialog?.kind === 'settings' ? jsx(SettingsModal, {
+          key: 'settings',
+          rootInfo, t,
+          onPick: () => pickDirectory?.() ?? Promise.reject(new Error('picker unavailable')),
+          onSave: saveRoot,
+          onDismiss: dismissDialog,
+        }) : null,
         dialog?.kind === 'delete' ? jsx(Modal, {
           title: `🗑 ${t('confirm.delete.title')}`, danger: true, onDismiss: dismissDialog,
           autoFocusSelector: '.dsha-btn-danger',
@@ -1296,11 +1465,20 @@ window.__ModuleLoader__.load({
         name: 'main',
         key: PANEL_ID,
         locale: NS,
+        inject: () => ({
+          pickDirectory: () => {
+            const service = ctx.uiWorkspace
+            if (service === undefined || typeof service.pickDirectory !== 'function') {
+              return Promise.reject(new Error('picker unavailable'))
+            }
+            return service.pickDirectory()
+          },
+        }),
       }, ArtifactsPanel))
     }
 
     exports.apply = apply
-    exports.inject = ['slots', 'locale']
+    exports.inject = ['slots', 'locale', 'uiWorkspace']
     exports.ArtifactsPanel = ArtifactsPanel
     exports.PanelIcon = PanelIcon
     exports.fetchSearch = fetchSearch

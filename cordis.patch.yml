@@ -4,10 +4,17 @@
 # treats it as a package specifier, so a subpath entry would be cached as
 # "not a client package" and the browser half would silently never load.
 #
-# `root` is the 产物 root the panel browses; every request is confined under it.
-# Edit the value here (then reload DSH) to manage another directory.
+# The artifacts root is configurable, in order:
+#   1. the panel's ⚙ settings dialog (persists through the config editor
+#      into the user's patch layer below),
+#   2. the `DSH_ARTIFACTS_ROOT` environment variable,
+#   3. the per-user default `~/.dsh/artifacts` (created on first run).
+# To set it by hand instead, add a row to YOUR patch layer (it overrides this
+# bundle's row by id):
+#
+# - id: dsh-artifacts
+#   config:
+#     root: 'D:\some\folder'
 - insert:
     - id: dsh-artifacts
       name: 'dsh-artifacts'
-      config:
-        root: 'F:\desktop\草稿文件\dsh产物'
