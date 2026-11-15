@@ -1,0 +1,46 @@
+{
+  "name": "dsh-artifacts",
+  "version": "1.0.0",
+  "description": "DSH 产物管家：在左侧栏新增入口，浏览、管理 DSH 生成的产物文件，支持彩色卡片 / 列表两种视图切换",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "artifacts",
+    "产物",
+    "文件管理"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

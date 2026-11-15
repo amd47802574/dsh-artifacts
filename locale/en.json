@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "title": "Artifacts manager",
+    "description": "Adds an Artifacts entry to the left sidebar: browse the DSH deliverables folder with colorful card or list views, preview images and text, and open, reveal, rename, create, or delete entries.",
+    "detail": "docs/DETAIL.md"
+  },
+  "panel": {
+    "label": "Artifacts"
+  }
+}
