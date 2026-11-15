@@ -3,6 +3,7 @@
 // Three authenticated JSON/binary routes for the browser half:
 //
 //   GET  /api/dsh-artifacts.list?path=...   -> one directory level under the root
+//   GET  /api/dsh-artifacts.search?query=.. -> name search across the whole tree
 //   GET  /api/dsh-artifacts.file?path=...   -> one file's bytes (previews / downloads)
 //   POST /api/dsh-artifacts.action          -> open / reveal / rename / delete / mkdir
 //
@@ -32,6 +33,15 @@ const DEFAULT_ROOT = 'F:\\desktop\\草稿文件\\dsh产物'
 
 /** One listing never answers with more rows than this. */
 const MAX_ENTRIES = 2000
+
+/** One search answers with at most this many matches. */
+const MAX_SEARCH_RESULTS = 200
+
+/** A search never inspects more entries than this before giving up. */
+const MAX_SEARCH_SCAN = 20000
+
+/** A search never descends deeper than this many directory levels. */
+const MAX_SEARCH_DEPTH = 12
 
 /** The file route refuses to serve anything bigger than this. */
 const MAX_FILE_BYTES = 128 * 1024 * 1024
@@ -319,6 +329,72 @@ function extnameLower(target) {
   return dot > 0 ? name.slice(dot).toLowerCase() : ''
 }
 
+/**
+ * Case-insensitive name search across the whole tree.
+ *
+ * Directory symlinks and junctions are never followed (no loops, no escape);
+ * the links themselves still match by name. Two hard caps keep a huge or
+ * pathological tree from running away: one on inspected entries, one on the
+ * number of answers, and either cut reports `truncated`.
+ */
+async function searchNames(root, rawQuery, limit) {
+  const needle = String(rawQuery).trim().toLowerCase()
+  const results = []
+  let scanned = 0
+  let truncated = false
+
+  const record = async (dirent, childRel) => {
+    let size
+    let mtimeMs
+    try {
+      const info = await lstat(join(root, childRel))
+      size = info.isFile() ? info.size : undefined
+      mtimeMs = info.mtimeMs
+    } catch {
+      /* a vanished entry still matches; the metadata is best-effort */
+    }
+    results.push({
+      name: dirent.name,
+      path: childRel,
+      type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : 'file',
+      size,
+      mtimeMs,
+      hidden: /^\./u.test(dirent.name),
+    })
+  }
+
+  const walk = async (dir, rel, depth) => {
+    if (truncated) return
+    if (depth > MAX_SEARCH_DEPTH || scanned >= MAX_SEARCH_SCAN) {
+      truncated = true
+      return
+    }
+    let dirents
+    try {
+      dirents = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return // an unreadable subtree is skipped, not fatal
+    }
+    for (const dirent of dirents) {
+      if (results.length >= limit || scanned >= MAX_SEARCH_SCAN) {
+        truncated = true
+        return
+      }
+      scanned += 1
+      const childRel = rel === '' ? dirent.name : `${rel}/${dirent.name}`
+      const matches = dirent.name.toLowerCase().includes(needle)
+      if (matches) await record(dirent, childRel)
+      // Only real directories descend; symlinked ones are matched but not entered.
+      if (dirent.isDirectory() && !dirent.isSymbolicLink()) {
+        await walk(join(dir, dirent.name), childRel, depth + 1)
+      }
+    }
+  }
+
+  await walk(root, '', 0)
+  return { ok: true, query: String(rawQuery), count: results.length, truncated, scanned, results }
+}
+
 /** Open one path with the OS default application, or reveal it in the file manager. */
 function shellOpen(target, reveal) {
   if (process.platform === 'win32') {
@@ -470,6 +546,29 @@ export function apply(ctx, config = {}) {
           })
         }
         return await serveFile(root, target)
+      } catch (error) {
+        return errorResponse(error)
+      }
+    },
+  })
+
+  register({
+    path: '/api/dsh-artifacts.search',
+    methods: ['GET', 'HEAD'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      try {
+        const url = new URL(request.url)
+        const query = url.searchParams.get('query') ?? ''
+        if (query.trim() === '') return json({ ok: true, query, count: 0, truncated: false, results: [] })
+        const requested = Number(url.searchParams.get('limit'))
+        const limit = Number.isFinite(requested) && requested >= 1
+          ? Math.min(Math.trunc(requested), MAX_SEARCH_RESULTS)
+          : MAX_SEARCH_RESULTS
+        if (!rootReadable(root)) {
+          return fail(500, 'root-unreadable', `the artifacts root is not readable: ${root}`)
+        }
+        return json(await searchNames(root, query, limit))
       } catch (error) {
         return errorResponse(error)
       }

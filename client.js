@@ -51,8 +51,16 @@ window.__ModuleLoader__.load({
       'action.download': '下载',
       'action.clearFilter': '清除筛选',
       'action.working': '处理中…',
-      'filter.label': '筛选',
-      'filter.placeholder': '筛选当前目录…',
+      'action.openFolder': '打开所在文件夹',
+      'filter.label': '搜索',
+      'filter.placeholder': '搜索产物名…',
+      'search.label': '搜索',
+      'search.scope': '搜索整个产物库',
+      'search.results': '{n} 个结果',
+      'search.empty.title': '没有找到「{q}」',
+      'search.empty.hint': '换个关键词试试；搜索覆盖产物库的全部子目录',
+      'search.hint.truncated': '结果较多，仅显示前 {n} 条',
+      'search.hint.scanned': '已扫描 {n} 项',
       'sort.label': '排序',
       'sort.mtime': '按时间',
       'sort.name': '按名称',
@@ -62,7 +70,6 @@ window.__ModuleLoader__.load({
       'stat.size': '共 {size}',
       'empty.title': '这里还没有产物',
       'empty.hint': '让 DSH 帮你生成一份报告、一张图或一个网页，它们会出现在这里',
-      'empty.filter.title': '没有匹配的条目',
       'error.title': '加载失败',
       'hint.truncated': '条目过多，仅显示前 2000 项',
       'confirm.delete.title': '确认删除',
@@ -118,8 +125,16 @@ window.__ModuleLoader__.load({
       'action.download': 'Download',
       'action.clearFilter': 'Clear filter',
       'action.working': 'Working…',
-      'filter.label': 'Filter',
-      'filter.placeholder': 'Filter this directory…',
+      'action.openFolder': 'Open containing folder',
+      'filter.label': 'Search',
+      'filter.placeholder': 'Search artifact names…',
+      'search.label': 'Search',
+      'search.scope': 'Searching the whole artifacts library',
+      'search.results': '{n} results',
+      'search.empty.title': 'Nothing matches "{q}"',
+      'search.empty.hint': 'Try another keyword; the search covers every subdirectory',
+      'search.hint.truncated': 'Showing the first {n} matches',
+      'search.hint.scanned': '{n} entries scanned',
       'sort.label': 'Sort',
       'sort.mtime': 'By time',
       'sort.name': 'By name',
@@ -129,7 +144,6 @@ window.__ModuleLoader__.load({
       'stat.size': '{size} total',
       'empty.title': 'No artifacts here yet',
       'empty.hint': 'Ask DSH for a report, an image, or a page — the output lands here',
-      'empty.filter.title': 'No matching entries',
       'error.title': 'Failed to load',
       'hint.truncated': 'Too many entries; showing the first 2000',
       'confirm.delete.title': 'Confirm deletion',
@@ -299,6 +313,21 @@ window.__ModuleLoader__.load({
       return full.length > maxChars ? { text: full.slice(0, maxChars), truncated: true } : { text: full, truncated: false }
     }
 
+    /** Name search across the whole artifacts tree. */
+    async function fetchSearch(query, limit) {
+      const url = new URL(`${API}.search`, window.location.origin)
+      url.searchParams.set('query', query)
+      if (limit !== undefined) url.searchParams.set('limit', String(limit))
+      const response = await fetch(url, { method: 'GET' })
+      const body = await response.json().catch(() => undefined)
+      if (!response.ok || body?.ok !== true) {
+        const error = new Error(body?.error ?? `HTTP ${response.status}`)
+        error.code = body?.code
+        throw error
+      }
+      return body
+    }
+
     /** Windows-reserved characters a fresh name must not carry. */
     const NAME_INVALID = /[<>:"|?*\u0000-\u001f/\\]/u
 
@@ -387,6 +416,9 @@ window.__ModuleLoader__.load({
 .dsha-row-num{font-size:11.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
 .dsha-row-actions{display:flex;gap:4px;opacity:.25;transition:opacity .12s ease}
 .dsha-row:hover .dsha-row-actions,.dsha-row:focus-within .dsha-row-actions{opacity:1}
+.dsha-search-path{max-width:320px;font-size:10.5px;padding:1px 6px;text-align:left}
+.dsha-search-band{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.dsha-search-band .dsha-stat-pill{font-weight:600}
 .dsha-entry-hidden{opacity:.68}
 .dsha-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:64px 20px;text-align:center}
 .dsha-empty-emoji{font-size:44px;filter:saturate(1.3)}
@@ -631,6 +663,62 @@ window.__ModuleLoader__.load({
       })
     }
 
+        /** Split a root-relative entry path into its parent directory and name. */
+    function splitPath(childPath) {
+      const slash = childPath.lastIndexOf('/')
+      return slash === -1
+        ? { parent: '', name: childPath }
+        : { parent: childPath.slice(0, slash), name: childPath.slice(slash + 1) }
+    }
+
+    /** One search hit: like a list row, plus the folder it lives in. */
+    function SearchRow(props) {
+      const { result, t, onNavigate, onPreview, onOpen, onReveal, onRename, onDelete } = props
+      const entry = { name: result.name, type: result.type, size: result.size, mtimeMs: result.mtimeMs, hidden: result.hidden }
+      const kind = kindOf(entry)
+      const art = KIND_ART[kind]
+      const { parent } = splitPath(result.path)
+      return jsxs('div', {
+        className: `dsha-row${entry.hidden ? ' dsha-entry-hidden' : ''}`,
+        role: 'button',
+        tabIndex: 0,
+        style: { '--dsha-glow': art.glow },
+        onClick: () => activate(entry, kind, { onNavigate, onPreview, onOpen }, result.path),
+        onKeyDown: (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            activate(entry, kind, { onNavigate, onPreview, onOpen }, result.path)
+          }
+        },
+        children: [
+          jsxs('div', { className: 'dsha-row-name', children: [
+            jsx('span', { className: 'dsha-row-glyph', style: { background: art.glow }, children: art.emoji }),
+            jsxs('span', { className: 'dsha-row-title', children: [
+              jsx('span', { className: 'dsha-row-name-text', title: result.name, children: result.name }),
+              jsx('button', {
+                className: 'dsha-crumb dsha-search-path',
+                title: parent === '' ? t('crumb.root') : parent,
+                'aria-label': `${t('action.openFolder')}: ${result.name}`,
+                onClick: (event) => { event.stopPropagation(); onNavigate(parent) },
+                children: parent === '' ? `🏠 ${t('crumb.root')}` : parent,
+              }),
+            ] }),
+          ] }),
+          jsx('div', { className: 'dsha-row-num', children: entry.type === 'directory' ? '—' : formatSize(entry.size) }),
+          jsx('div', { className: 'dsha-row-num', children: formatTime(entry.mtimeMs) }),
+          jsx('div', {
+            className: 'dsha-row-actions',
+            onClick: (event) => event.stopPropagation(),
+            onKeyDown: (event) => event.stopPropagation(),
+            children: jsx(EntryActions, {
+              entry, path: parent, t,
+              onPreview, onOpen, onReveal, onRename, onDelete,
+            }),
+          }),
+        ],
+      })
+    }
+
     // --- preview overlay -----------------------------------------------------------
 
     function PreviewOverlay({ preview, t, onOpenEntry, onDismiss }) {
@@ -745,11 +833,15 @@ window.__ModuleLoader__.load({
         } catch { return 'mtime' }
       })
       const [filter, setFilter] = useState('')
+      const [search, setSearch] = useState(null)
+      const [searchLoading, setSearchLoading] = useState(false)
+      const [searchError, setSearchError] = useState(null)
       const [preview, setPreview] = useState(null)
       const [dialog, setDialog] = useState(null)
       const [notice, setNotice] = useState(null)
       const noticeTimer = useRef(null)
       const pathRef = useRef('')
+      const searchRef = useRef('')
 
       const showToast = useCallback((text) => {
         setNotice(text)
@@ -791,8 +883,40 @@ window.__ModuleLoader__.load({
 
       useEffect(() => { void load('') }, [load])
 
+      // The search box: debounced whole-tree name search, replacing the body
+      // while a query is active; emptying it returns to the directory view.
+      const searchActive = filter.trim() !== ''
+      const runSearch = useCallback(async (query) => {
+        searchRef.current = query
+        if (query === '') {
+          setSearch(null)
+          setSearchError(null)
+          setSearchLoading(false)
+          return
+        }
+        setSearchLoading(true)
+        setSearchError(null)
+        try {
+          const result = await fetchSearch(query, 200)
+          if (searchRef.current !== query) return
+          setSearch(result)
+          setSearchLoading(false)
+        } catch (cause) {
+          if (searchRef.current !== query) return
+          setSearch(null)
+          setSearchError(cause instanceof Error ? cause.message : String(cause))
+          setSearchLoading(false)
+        }
+      }, [])
+      useEffect(() => {
+        const query = filter.trim()
+        const timer = window.setTimeout(() => { void runSearch(query) }, 350)
+        return () => window.clearTimeout(timer)
+      }, [filter, runSearch])
+
       const navigate = useCallback((target) => {
         setFilter('')
+        setSearch(null)
         setPath(target)
         void load(target)
       }, [load])
@@ -809,9 +933,7 @@ window.__ModuleLoader__.load({
 
       const entries = useMemo(() => {
         const raw = listing?.entries ?? []
-        const needle = filter.trim().toLowerCase()
-        const filtered = needle === '' ? raw : raw.filter((entry) => entry.name.toLowerCase().includes(needle))
-        const sorted = [...filtered].sort((a, b) => {
+        const sorted = [...raw].sort((a, b) => {
           const aDir = a.type === 'directory'
           const bDir = b.type === 'directory'
           if (aDir !== bDir) return aDir ? -1 : 1
@@ -820,7 +942,7 @@ window.__ModuleLoader__.load({
           return (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0)
         })
         return sorted
-      }, [listing, filter, sortMode])
+      }, [listing, sortMode])
 
       const stats = useMemo(() => {
         let folders = 0
@@ -891,11 +1013,12 @@ window.__ModuleLoader__.load({
             showToast(interpolate(t('notice.deleted'), { name: current.entry.name }))
           }
           setDialog(null)
+          if (searchRef.current !== '') void runSearch(searchRef.current)
           void load(pathRef.current)
         } catch (cause) {
           reportFailure(cause)
         }
-      }, [dialog, t, showToast, reportFailure, load])
+      }, [dialog, t, showToast, reportFailure, load, runSearch])
 
       const crumbs = useMemo(() => {
         const parts = path === '' ? [] : path.split('/')
@@ -908,7 +1031,6 @@ window.__ModuleLoader__.load({
 
       const shared = { t, onNavigate: navigate, onPreview: previewEntry, onOpen: openEntry, onReveal: revealEntry, onRename: askRename, onDelete: askDelete }
       const parentTarget = listing?.parent ?? ''
-      const filterActive = filter.trim() !== ''
 
       return jsxs('div', { className: 'dsha-root', children: [
         jsx('style', { children: STYLE }),
@@ -964,6 +1086,48 @@ window.__ModuleLoader__.load({
         ] }),
         jsxs('div', { className: 'dsha-body', children: [
           (() => {
+            if (searchActive) {
+              const query = filter.trim()
+              if (searchLoading) {
+                return jsx('div', { className: 'dsha-skeleton-list', children: [0, 1, 2, 3, 4, 5, 6].map((n) => jsx('div', { className: 'dsha-skeleton-row' }, n)) })
+              }
+              if (searchError !== null) {
+                return jsxs('div', { className: 'dsha-state', children: [
+                  jsx('div', { className: 'dsha-empty-emoji', children: '🧯' }),
+                  jsx('div', { className: 'dsha-empty-title dsha-error', children: t('error.title') }),
+                  jsx('div', { className: 'dsha-empty-hint', children: searchError }),
+                  jsx('button', { className: 'dsha-btn dsha-btn-primary', onClick: () => void runSearch(query), children: `⟳ ${t('action.retry')}` }),
+                ] })
+              }
+              const results = search?.results ?? []
+              if (results.length === 0) {
+                return jsxs('div', { className: 'dsha-state', children: [
+                  jsx('div', { className: 'dsha-empty-emoji', children: '🔍' }),
+                  jsx('div', { className: 'dsha-empty-title', children: interpolate(t('search.empty.title'), { q: query }) }),
+                  jsx('div', { className: 'dsha-empty-hint', children: t('search.empty.hint') }),
+                  jsx('button', { className: 'dsha-btn', onClick: () => setFilter(''), children: t('action.clearFilter') }),
+                ] })
+              }
+              return jsxs(Fragment, {
+                children: [
+                  jsxs('div', { className: 'dsha-search-band', children: [
+                    jsx('span', { className: 'dsha-stat-pill', children: `🔍 ${interpolate(t('search.results'), { n: search?.count ?? results.length })}` }),
+                    jsx('span', { className: 'dsha-subtitle', children: t('search.scope') }),
+                    search?.truncated === true ? jsx('span', { className: 'dsha-subtitle', children: `⚠️ ${interpolate(t('search.hint.truncated'), { n: 200 })}` }) : null,
+                    jsx('button', { className: 'dsha-btn', style: { marginLeft: 'auto' }, onClick: () => setFilter(''), children: `${t('action.clearFilter')}「${query}」` }),
+                  ] }),
+                  view === 'card'
+                    ? jsx('div', { className: 'dsha-grid', children: results.map((result) => {
+                        const { parent, name } = splitPath(result.path)
+                        return jsx(Card, {
+                          entry: { name, type: result.type, size: result.size, mtimeMs: result.mtimeMs, hidden: result.hidden },
+                          path: parent, ...shared,
+                        }, result.path)
+                      }) })
+                    : jsx('div', { className: 'dsha-list', children: results.map((result) => jsx(SearchRow, { result, ...shared }, result.path)) }),
+                ],
+              })
+            }
             if (loading) {
               return view === 'list'
                 ? jsx('div', { className: 'dsha-skeleton-list', children: [0, 1, 2, 3, 4, 5, 6, 7].map((n) => jsx('div', { className: 'dsha-skeleton-row' }, n)) })
@@ -978,13 +1142,6 @@ window.__ModuleLoader__.load({
               ] })
             }
             if (entries.length === 0) {
-              if (filterActive) {
-                return jsxs('div', { className: 'dsha-state', children: [
-                  jsx('div', { className: 'dsha-empty-emoji', children: '🔍' }),
-                  jsx('div', { className: 'dsha-empty-title', children: t('empty.filter.title') }),
-                  jsx('button', { className: 'dsha-btn', onClick: () => setFilter(''), children: `${t('action.clearFilter')}「${filter.trim()}」` }),
-                ] })
-              }
               return jsxs('div', { className: 'dsha-state', children: [
                 jsx('div', { className: 'dsha-empty-emoji', children: '🌈' }),
                 jsx('div', { className: 'dsha-empty-title', children: t('empty.title') }),
