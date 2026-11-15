@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
       'notice.revealed': '已在资源管理器中显示',
       'error.invalid-name.local': '名称含有本机不允许的字符',
       'error.generic': '操作失败：{message}',
+      'error.search.unavailable': '搜索暂不可用（路由缺失），请重启 DSH 后重试',
       'error.code.name-exists': '同名条目已存在',
       'error.code.not-found': '目标不存在（可能已被删除或移动）',
       'error.code.denied': '没有权限执行该操作',
@@ -164,6 +165,7 @@ window.__ModuleLoader__.load({
       'notice.revealed': 'Shown in the file manager',
       'error.invalid-name.local': 'The name uses characters this machine does not allow',
       'error.generic': 'The operation failed: {message}',
+      'error.search.unavailable': 'Search is unavailable (route missing); restart DSH and try again',
       'error.code.name-exists': 'An entry with this name already exists',
       'error.code.not-found': 'The target no longer exists (deleted or moved)',
       'error.code.denied': 'The operating system refused this operation',
@@ -313,7 +315,7 @@ window.__ModuleLoader__.load({
       return full.length > maxChars ? { text: full.slice(0, maxChars), truncated: true } : { text: full, truncated: false }
     }
 
-    /** Name search across the whole artifacts tree. */
+    /** Name search across the whole artifacts tree (dedicated host route). */
     async function fetchSearch(query, limit) {
       const url = new URL(`${API}.search`, window.location.origin)
       url.searchParams.set('query', query)
@@ -323,9 +325,69 @@ window.__ModuleLoader__.load({
       if (!response.ok || body?.ok !== true) {
         const error = new Error(body?.error ?? `HTTP ${response.status}`)
         error.code = body?.code
+        error.status = response.status
         throw error
       }
       return body
+    }
+
+    /**
+     * Fallback search: breadth-first walk over the `.list` route.
+     *
+     * Used when the dedicated `.search` route answers 404 — the browser half
+     * is fresh while the host module has not been reloaded yet. Same matching
+     * and answer shape as the native route, bounded by its own caps.
+     */
+    async function fetchSearchByWalk(query, limit, isStale) {
+      const needle = query.trim().toLowerCase()
+      const results = []
+      let truncated = false
+      let scanned = 0
+      let dirs = 0
+      const queue = [{ path: '', depth: 0 }]
+      const MAX_DIRS = 80
+      const MAX_SCAN = 6000
+      const MAX_DEPTH = 8
+      while (queue.length > 0) {
+        if (results.length >= limit || scanned >= MAX_SCAN || dirs >= MAX_DIRS) {
+          truncated = true
+          break
+        }
+        if (isStale()) return null
+        const { path, depth } = queue.shift()
+        let listing
+        try {
+          listing = await fetchList(path)
+        } catch (error) {
+          if (path === '') throw error // even the root is unreadable — report, don't fake an empty result
+          continue // an unreadable subtree is skipped, not fatal
+        }
+        dirs += 1
+        for (const entry of listing.entries) {
+          if (isStale()) return null
+          scanned += 1
+          const child = path === '' ? entry.name : `${path}/${entry.name}`
+          if (entry.name.toLowerCase().includes(needle)) {
+            results.push({
+              name: entry.name,
+              path: child,
+              type: entry.type,
+              size: entry.size,
+              mtimeMs: entry.mtimeMs,
+              hidden: entry.hidden,
+            })
+            if (results.length >= limit) {
+              truncated = true
+              break
+            }
+          }
+          // Never descend into symlinks: no loops, no escape.
+          if (entry.type === 'directory' && depth < MAX_DEPTH) {
+            queue.push({ path: child, depth: depth + 1 })
+          }
+        }
+      }
+      return { ok: true, query, count: results.length, truncated, results }
     }
 
     /** Windows-reserved characters a fresh name must not carry. */
@@ -897,17 +959,27 @@ window.__ModuleLoader__.load({
         setSearchLoading(true)
         setSearchError(null)
         try {
-          const result = await fetchSearch(query, 200)
+          let result
+          try {
+            result = await fetchSearch(query, 200)
+          } catch (cause) {
+            // A 404 here means the running host module predates the dedicated
+            // route; walk the tree over `.list` instead, same answers.
+            if (cause.status !== 404 && cause.message !== 'HTTP 404') throw cause
+            result = await fetchSearchByWalk(query, 200, () => searchRef.current !== query)
+            if (result === null) return // superseded by a newer query
+          }
           if (searchRef.current !== query) return
           setSearch(result)
           setSearchLoading(false)
         } catch (cause) {
           if (searchRef.current !== query) return
           setSearch(null)
-          setSearchError(cause instanceof Error ? cause.message : String(cause))
+          const unavailable = cause.status === 404 || cause.message === 'HTTP 404'
+          setSearchError(unavailable ? t('error.search.unavailable') : cause instanceof Error ? cause.message : String(cause))
           setSearchLoading(false)
         }
-      }, [])
+      }, [t])
       useEffect(() => {
         const query = filter.trim()
         const timer = window.setTimeout(() => { void runSearch(query) }, 350)
@@ -1231,6 +1303,9 @@ window.__ModuleLoader__.load({
     exports.inject = ['slots', 'locale']
     exports.ArtifactsPanel = ArtifactsPanel
     exports.PanelIcon = PanelIcon
+    exports.fetchSearch = fetchSearch
+    exports.fetchSearchByWalk = fetchSearchByWalk
+    exports.fetchList = fetchList
     return module.exports
   },
 })

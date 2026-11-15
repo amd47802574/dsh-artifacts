@@ -1,6 +1,6 @@
 {
   "name": "dsh-artifacts",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DSH 产物管家：在左侧栏新增入口，浏览、管理 DSH 生成的产物文件，支持彩色卡片 / 列表两种视图切换",
   "type": "module",
   "private": true,
