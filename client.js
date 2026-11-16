@@ -1465,9 +1465,14 @@ window.__ModuleLoader__.load({
         name: 'main',
         key: PANEL_ID,
         locale: NS,
+        // The system folder picker is resolved lazily at render time, NOT
+        // declared as a module-level inject: a required missing service would
+        // keep the whole client module inactive and the sidebar entry would
+        // vanish. Without the picker the settings dialog still offers the
+        // manual path input.
         inject: () => ({
           pickDirectory: () => {
-            const service = ctx.uiWorkspace
+            const service = ctx.get('uiWorkspace')
             if (service === undefined || typeof service.pickDirectory !== 'function') {
               return Promise.reject(new Error('picker unavailable'))
             }
@@ -1478,7 +1483,7 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply
-    exports.inject = ['slots', 'locale', 'uiWorkspace']
+    exports.inject = ['slots', 'locale']
     exports.ArtifactsPanel = ArtifactsPanel
     exports.PanelIcon = PanelIcon
     exports.fetchSearch = fetchSearch
