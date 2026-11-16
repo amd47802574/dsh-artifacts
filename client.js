@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'artifacts'
     const VIEW_KEY = 'dsh-artifacts:view'
     const SORT_KEY = 'dsh-artifacts:sort'
+    const HIDE_CODE_KEY = 'dsh-artifacts:hide-code'
 
     // --- copy -----------------------------------------------------------------
 
@@ -52,6 +53,9 @@ window.__ModuleLoader__.load({
       'action.clearFilter': '清除筛选',
       'action.working': '处理中…',
       'action.openFolder': '打开所在文件夹',
+      'action.toggleCode': '隐藏代码与脚本',
+      'action.showCode': '显示代码与脚本',
+      'hint.codeHidden': '已隐藏 {n} 个代码 / 脚本文件',
       'filter.label': '搜索',
       'filter.placeholder': '搜索产物名…',
       'search.label': '搜索',
@@ -139,6 +143,9 @@ window.__ModuleLoader__.load({
       'action.clearFilter': 'Clear filter',
       'action.working': 'Working…',
       'action.openFolder': 'Open containing folder',
+      'action.toggleCode': 'Hide code and scripts',
+      'action.showCode': 'Show code and scripts',
+      'hint.codeHidden': '{n} code / script files hidden',
       'filter.label': 'Search',
       'filter.placeholder': 'Search artifact names…',
       'search.label': 'Search',
@@ -218,6 +225,10 @@ window.__ModuleLoader__.load({
     const SLIDE_EXTS = new Set(['.pptx', '.ppt'])
     const DOC_EXTS = new Set(['.doc', '.docx', '.txt', '.md', '.markdown', '.rtf', '.pages', '.log', '.ini', '.toml'])
     const CODE_EXTS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.json', '.html', '.htm', '.css', '.yml', '.yaml', '.sh', '.bat', '.cmd', '.ps1', '.xml', '.sql', '.java', '.go', '.rs', '.c', '.h', '.cpp'])
+    /** Compiled / interpreter-cached by-products of running those scripts. */
+    const TRANSIENT_EXTS = new Set(['.pyc', '.pyo', '.pyd', '.class', '.jar', '.o', '.obj', '.dll', '.exe', '.so', '.dylib', '.wasm', '.tmp', '.temp', '.bak', '.swp', '.cache'])
+    /** True dot-directories runners spray into every workspace. */
+    const TRANSIENT_DIRS = new Set(['__pycache__', 'node_modules', '.venv', 'venv', '.pytest_cache', '.mypy_cache', '.ruff_cache', 'dist', 'build', '.cache', '.tmp'])
     const ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'])
     const PDF_EXTS = new Set(['.pdf'])
     const TEXT_PREVIEWABLE = new Set([...DOC_EXTS, ...CODE_EXTS])
@@ -263,6 +274,18 @@ window.__ModuleLoader__.load({
       const ext = dot > 0 ? String(entry.name).slice(dot).toLowerCase() : ''
       if (!TEXT_PREVIEWABLE.has(ext)) return false
       return entry.size === undefined || entry.size <= 1024 * 1024
+    }
+
+    /**
+     * Whether one entry looks like a by-product of a run: code / script files,
+     * compiled caches, runner scratch directories. Used by the hide toggle.
+     */
+    function isTransientFile(entry) {
+      const name = String(entry.name)
+      if (entry.type === 'directory') return TRANSIENT_DIRS.has(name.toLowerCase())
+      const dot = name.lastIndexOf('.')
+      const ext = dot > 0 ? name.slice(dot).toLowerCase() : ''
+      return CODE_EXTS.has(ext) || TRANSIENT_EXTS.has(ext)
     }
 
     /** Human size, one decimal below 10. */
@@ -1015,6 +1038,9 @@ window.__ModuleLoader__.load({
           return stored === 'name' || stored === 'size' ? stored : 'mtime'
         } catch { return 'mtime' }
       })
+      const [hideCode, setHideCode] = useState(() => {
+        try { return window.localStorage.getItem(HIDE_CODE_KEY) === '1' } catch { return false }
+      })
       const [filter, setFilter] = useState('')
       const [search, setSearch] = useState(null)
       const [searchLoading, setSearchLoading] = useState(false)
@@ -1159,9 +1185,15 @@ window.__ModuleLoader__.load({
         try { window.localStorage.setItem(SORT_KEY, mode) } catch { /* preference is best-effort */ }
       }, [])
 
+      const changeHideCode = useCallback((on) => {
+        setHideCode(on)
+        try { window.localStorage.setItem(HIDE_CODE_KEY, on ? '1' : '0') } catch { /* preference is best-effort */ }
+      }, [])
+
       const entries = useMemo(() => {
         const raw = listing?.entries ?? []
-        const sorted = [...raw].sort((a, b) => {
+        const kept = hideCode ? raw.filter((entry) => !isTransientFile(entry)) : raw
+        const sorted = [...kept].sort((a, b) => {
           const aDir = a.type === 'directory'
           const bDir = b.type === 'directory'
           if (aDir !== bDir) return aDir ? -1 : 1
@@ -1170,7 +1202,12 @@ window.__ModuleLoader__.load({
           return (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0)
         })
         return sorted
-      }, [listing, sortMode])
+      }, [listing, sortMode, hideCode])
+
+      const hiddenCodeCount = useMemo(() => {
+        if (!hideCode) return 0
+        return (listing?.entries ?? []).filter((entry) => isTransientFile(entry)).length
+      }, [listing, hideCode])
 
       const stats = useMemo(() => {
         let folders = 0
@@ -1275,6 +1312,12 @@ window.__ModuleLoader__.load({
             ] }),
             jsxs('div', { className: 'dsha-header-actions', children: [
               jsx('button', { className: 'dsha-btn', onClick: askSettings, title: t('settings.title'), 'aria-label': t('settings.title'), children: '⚙' }),
+              jsx('button', {
+                className: 'dsha-btn', onClick: () => changeHideCode(!hideCode),
+                title: hideCode ? t('action.showCode') : t('action.toggleCode'),
+                'aria-pressed': hideCode,
+                children: hideCode ? '🙈 代码已隐藏' : '🙈 隐藏代码',
+              }),
               jsx('button', { className: 'dsha-btn', onClick: askMkdir, children: `📁 ${t('action.mkdir')}` }),
               jsx('button', { className: 'dsha-btn', onClick: () => void load(pathRef.current), disabled: loading, children: `⟳ ${t('action.refresh')}` }),
               jsx('div', { className: 'dsha-segment', role: 'group', 'aria-label': t('panel.view'), children: [
@@ -1332,7 +1375,9 @@ window.__ModuleLoader__.load({
                   jsx('button', { className: 'dsha-btn dsha-btn-primary', onClick: () => void runSearch(query), children: `⟳ ${t('action.retry')}` }),
                 ] })
               }
-              const results = search?.results ?? []
+              const resultsRaw = search?.results ?? []
+              const results = hideCode ? resultsRaw.filter((result) => !isTransientFile(result)) : resultsRaw
+              const searchHidden = resultsRaw.length - results.length
               if (results.length === 0) {
                 return jsxs('div', { className: 'dsha-state', children: [
                   jsx('div', { className: 'dsha-empty-emoji', children: '🔍' }),
@@ -1344,9 +1389,10 @@ window.__ModuleLoader__.load({
               return jsxs(Fragment, {
                 children: [
                   jsxs('div', { className: 'dsha-search-band', children: [
-                    jsx('span', { className: 'dsha-stat-pill', children: `🔍 ${interpolate(t('search.results'), { n: search?.count ?? results.length })}` }),
+                    jsx('span', { className: 'dsha-stat-pill', children: `🔍 ${interpolate(t('search.results'), { n: results.length })}` }),
                     jsx('span', { className: 'dsha-subtitle', children: t('search.scope') }),
                     search?.truncated === true ? jsx('span', { className: 'dsha-subtitle', children: `⚠️ ${interpolate(t('search.hint.truncated'), { n: 200 })}` }) : null,
+                    searchHidden > 0 ? jsx('span', { className: 'dsha-subtitle', children: `🙈 ${interpolate(t('hint.codeHidden'), { n: searchHidden })}` }) : null,
                     jsx('button', { className: 'dsha-btn', style: { marginLeft: 'auto' }, onClick: () => setFilter(''), children: `${t('action.clearFilter')}「${query}」` }),
                   ] }),
                   view === 'card'
@@ -1401,6 +1447,7 @@ window.__ModuleLoader__.load({
                       entries.map((entry) => jsx(ListRow, { entry, path, ...shared }, entry.name)),
                     ] }),
                 listing?.truncated === true ? jsx('div', { className: 'dsha-hint', children: `⚠️ ${t('hint.truncated')}` }) : null,
+                hiddenCodeCount > 0 ? jsx('div', { className: 'dsha-hint', children: `🙈 ${interpolate(t('hint.codeHidden'), { n: hiddenCodeCount })}` }) : null,
               ],
             })
           })(),
@@ -1486,6 +1533,7 @@ window.__ModuleLoader__.load({
     exports.inject = ['slots', 'locale']
     exports.ArtifactsPanel = ArtifactsPanel
     exports.PanelIcon = PanelIcon
+    exports.isTransientFile = isTransientFile
     exports.fetchSearch = fetchSearch
     exports.fetchSearchByWalk = fetchSearchByWalk
     exports.fetchList = fetchList
