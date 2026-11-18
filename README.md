@@ -54,6 +54,16 @@
 | `locale/*.json` | 插件清单标题与描述（en / zh） |
 | `icon.svg` | 插件图标 |
 | `docs/DETAIL.md` | 插件详情页文档 |
+| `test/*.mjs` | 独立冒烟测试：`npm test`（无需 cordis / 浏览器） |
+
+## 测试
+
+```sh
+npm test   # node test/host.mjs && node test/search-fallback.mjs
+```
+
+- `test/host.mjs`：不依赖 cordis，伪造 connection / ctx 驱动全部 host 路由——列表 / 文件服务 / 动作 / 搜索 / 配置持久化，路径穿越与符号链接逃逸拒绝、Windows 保留名等断言
+- `test/search-fallback.mjs`：伪造浏览器外壳加载真实 `client.js`，shim `fetch` 打真实路由，验证旧宿主（无 `.search` 路由）下的搜索回退、过期查询守卫与「隐藏代码」谓词
 
 ## License
 
