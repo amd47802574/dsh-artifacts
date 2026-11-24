@@ -17,7 +17,7 @@
 // path must resolve inside the configured root (no `..`, absolute paths, other
 // drives), and the fully-resolved real path - symlinks followed - must stay
 // inside the root again, so a link planted in the tree cannot read past it.
-import { readdir, lstat, stat, rm, rename, mkdir, readFile, realpath, readlink } from 'node:fs/promises'
+import { readdir, lstat, stat, rm, rename, mkdir, readFile, realpath, readlink, writeFile } from 'node:fs/promises'
 import { existsSync, readdirSync, mkdirSync } from 'node:fs'
 import { join, resolve as resolvePath, sep, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
@@ -315,7 +315,9 @@ async function listDirectory(root, target) {
   const truncated = dirents.length > MAX_ENTRIES
   const rows = []
   for (let index = 0; index < dirents.length && index < MAX_ENTRIES; index += STAT_BATCH) {
-    rows.push(...await statBatch(target, dirents.slice(index, index + STAT_BATCH)))
+    // The recycle bin has its own view; it never appears in normal listings.
+    rows.push(...(await statBatch(target, dirents.slice(index, index + STAT_BATCH)))
+      .filter((row) => !(target === root && row.name === TRASH_DIRNAME)))
   }
   rows.sort((a, b) => {
     const aDir = a.type === 'directory'
@@ -415,6 +417,8 @@ async function searchNames(root, rawQuery, limit) {
       }
       scanned += 1
       const childRel = rel === '' ? dirent.name : `${rel}/${dirent.name}`
+      // The bin is invisible to search: it is reached only through its view.
+      if (rel === '' && dirent.name === TRASH_DIRNAME) continue
       const matches = dirent.name.toLowerCase().includes(needle)
       if (matches) await record(dirent, childRel)
       // Only real directories descend; symlinked ones are matched but not entered.
@@ -445,6 +449,179 @@ function shellOpen(target, reveal) {
 
 /** Windows-reserved characters and trailing dots/spaces that make a name unusable. */
 const WINDOWS_RESERVED = /[<>:"|?*\u0000-\u001f]/u
+
+/**
+ * The recycle bin lives inside the root, so every confinement check that
+ * guards the tree guards it too. The listing and search routes skip it: the
+ * bin has its own dedicated view and must not pollute normal browsing.
+ */
+const TRASH_DIRNAME = '.dsh-artifacts-trash'
+
+/** The trash directory under one root (absolute). */
+function trashDirOf(root) {
+  return join(root, TRASH_DIRNAME)
+}
+
+/** Read one trash entry's metadata; older bins without a file fall back to inference. */
+async function readTrashMeta(entryDir, entryName) {
+  try {
+    const raw = await readFile(join(entryDir, entryName, 'meta.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object' && typeof parsed.originalRel === 'string') {
+      return { originalRel: parsed.originalRel, deletedAt: Number(parsed.deletedAt) || undefined, name: typeof parsed.name === 'string' ? parsed.name : undefined }
+    }
+  } catch {
+    /* fall through to inference */
+  }
+  // `<epochMs>-<name>` naming, or a bare name from an unknown writer.
+  const dash = entryName.indexOf('-')
+  const stamp = dash > 0 ? Number(entryName.slice(0, dash)) : Number.NaN
+  const originalRel = Number.isFinite(stamp) && stamp > 0 ? entryName.slice(dash + 1) : entryName
+  return { originalRel, deletedAt: Number.isFinite(stamp) && stamp > 0 ? stamp : undefined, name: originalRel }
+}
+
+/** List the recycle bin: one row per entry, with its recorded origin. */
+async function listTrash(root) {
+  const trash = trashDirOf(root)
+  let dirents
+  try {
+    dirents = await readdir(trash, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, entries: [] }
+    rethrowMapped(error)
+  }
+  const rows = []
+  for (const dirent of dirents) {
+    const meta = await readTrashMeta(trash, dirent.name)
+    // The payload sits inside the wrapper directory; stat the payload itself.
+    const payloadPath = join(trash, dirent.name, meta.name)
+    let payloadInfo
+    try {
+      payloadInfo = await lstat(payloadPath)
+    } catch {
+      try {
+        payloadInfo = await lstat(join(trash, dirent.name))
+      } catch {
+        continue // vanished mid-scan
+      }
+    }
+    rows.push({
+      name: dirent.name,
+      originalRel: meta.originalRel,
+      deletedAt: meta.deletedAt,
+      type: payloadInfo.isDirectory() ? 'directory' : payloadInfo.isSymbolicLink() ? 'symlink' : 'file',
+      size: payloadInfo.isFile() ? payloadInfo.size : undefined,
+      mtimeMs: payloadInfo.mtimeMs,
+    })
+  }
+  rows.sort((a, b) => (b.deletedAt ?? 0) - (a.deletedAt ?? 0))
+  return { ok: true, entries: rows }
+}
+
+/**
+ * Move one entry into the bin: rename inside the root (instant, no copy), then
+ * drop a meta file recording where it came from. The entry must not already be
+ * inside the bin, and the bin itself can never be binned.
+ */
+async function trashEntry(root, target) {
+  const trash = trashDirOf(root)
+  const real = await ensureInsideReal(root, target)
+  const trashReal = await realpath(root).then((r) => join(r, TRASH_DIRNAME))
+  if (real === trashReal || real.startsWith(trashReal + sep)) {
+    throw new ArtifactsError(400, 'in-trash', 'the entry is already in the recycle bin; use purge or restore on it')
+  }
+  const originalRel = relativeInside(root, real)
+  if (originalRel === undefined) throw new ArtifactsError(403, 'outside-root', 'path escapes the artifacts root')
+  if (originalRel === '') throw new ArtifactsError(400, 'invalid', 'the artifacts root itself cannot be deleted')
+  await mkdir(trash, { recursive: true })
+  const stamped = `${Date.now()}-${basename(real)}`
+  // Every bin entry is a wrapper directory: `<stamp>-<name>/<payload>` plus a
+  // meta file beside the payload. A plain rename would make file entries and
+  // directory entries structurally different, and a file entry would have
+  // nowhere to carry its metadata.
+  const destination = join(trash, stamped)
+  try {
+    await mkdir(destination, { recursive: true })
+    await rename(real, join(destination, basename(real)))
+  } catch (error) {
+    rethrowMapped(error)
+  }
+  try {
+    await writeFileJson(destination, {
+      originalRel,
+      deletedAt: Date.now(),
+      name: basename(real),
+    })
+  } catch {
+    /* the move succeeded; a missing meta only degrades restore inference */
+  }
+  return { ok: true, action: 'trash', trashName: stamped, originalRel }
+}
+
+/** Write a small JSON file inside one trash entry (utf8, atomic-enough). */
+async function writeFileJson(dir, payload) {
+  await writeFile(join(dir, 'meta.json'), `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+}
+
+/**
+ * Put an entry back where it came from. The recorded origin is re-confined
+ * against the root before anything moves; a missing parent is recreated; a
+ * name collision gains a numeric suffix rather than overwriting.
+ */
+async function restoreEntry(root, target) {
+  const trash = trashDirOf(root)
+  const trashReal = join(await realpath(root), TRASH_DIRNAME)
+  const real = await ensureInsideReal(root, target)
+  if (!(real === trashReal || real.startsWith(trashReal + sep)) || real === trashReal) {
+    throw new ArtifactsError(400, 'not-in-trash', 'restore only works on entries inside the recycle bin')
+  }
+  const meta = await readTrashMeta(trash, basename(real))
+  const originalAbs = confinedPath(root, meta.originalRel)
+  if (originalAbs === root) throw new ArtifactsError(400, 'invalid', 'cannot restore onto the artifacts root itself')
+  // The payload sits inside the wrapper; a legacy flat entry is its own payload.
+  let source = real
+  try {
+    const payloadPath = join(real, meta.name)
+    const payloadInfo = await lstat(payloadPath)
+    if (payloadInfo.isDirectory() || payloadInfo.isFile() || payloadInfo.isSymbolicLink()) source = payloadPath
+  } catch {
+    /* legacy flat entry: the wrapper itself is the payload */
+  }
+  let destination = originalAbs
+  let suffix = 0
+  // A live entry at the destination must never be overwritten: keep suffixing.
+  for (;;) {
+    let existing
+    try {
+      existing = await lstat(destination)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') rethrowMapped(error)
+      break
+    }
+    if (existing.isDirectory() && source === real) {
+      // Restoring a directory onto a directory of the same name: move into it.
+      break
+    }
+    suffix += 1
+    const dot = basename(originalAbs).lastIndexOf('.')
+    const stem = dot > 0 ? basename(originalAbs).slice(0, dot) : basename(originalAbs)
+    const extension = dot > 0 ? basename(originalAbs).slice(dot) : ''
+    destination = join(dirname(originalAbs), `${stem} (${suffix})${extension}`)
+  }
+  try {
+    await mkdir(dirname(destination), { recursive: true })
+    await rename(source, destination)
+  } catch (error) {
+    rethrowMapped(error)
+  }
+  // Remove the (now payload-less) wrapper; a legacy flat entry is already gone.
+  try {
+    await rm(real, { recursive: true, force: true })
+  } catch {
+    /* best-effort cleanup */
+  }
+  return { ok: true, action: 'restore', path: relativeInside(root, destination) }
+}
 
 /** Apply one management action from the browser half. */
 async function applyAction(root, body) {
@@ -486,7 +663,37 @@ async function applyAction(root, body) {
       }
       return { ok: true, action, path: relativeInside(root, to) }
     }
+    case 'trash': {
+      return trashEntry(root, target)
+    }
+    case 'restore': {
+      return restoreEntry(root, target)
+    }
+    case 'purge': {
+      const real = await ensureInsideReal(root, target)
+      const trashReal = join(await realpath(root), TRASH_DIRNAME)
+      if (!(real.startsWith(trashReal + sep))) {
+        throw new ArtifactsError(400, 'not-in-trash', 'purge only works on entries inside the recycle bin')
+      }
+      try {
+        await rm(real, { recursive: true, force: false })
+      } catch (error) {
+        rethrowMapped(error)
+      }
+      return { ok: true, action }
+    }
+    case 'empty-trash': {
+      const trash = trashDirOf(root)
+      try {
+        await rm(trash, { recursive: true, force: true })
+      } catch (error) {
+        rethrowMapped(error)
+      }
+      return { ok: true, action }
+    }
     case 'delete': {
+      // Kept for compatibility: an immediate, unrecoverable delete. The UI
+      // never calls it on regular entries any more — the bin is the default.
       const real = await ensureInsideReal(root, target)
       try {
         await rm(real, { recursive: true, force: false })
@@ -643,6 +850,20 @@ export function apply(ctx, config = {}) {
         }
         if (request.method === 'HEAD') return new Response(null, { status: 200 })
         return json({ ok: true, root, source, exists: existsSync(root) })
+      } catch (error) {
+        return errorResponse(error)
+      }
+    },
+  })
+
+  register({
+    path: '/api/dsh-artifacts.trash',
+    methods: ['GET', 'HEAD'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      try {
+        if (request.method === 'HEAD') return new Response(null, { status: 200 })
+        return json(await listTrash(root))
       } catch (error) {
         return errorResponse(error)
       }

@@ -1,8 +1,11 @@
 // Standalone smoke test for dsh-artifacts host logic (no cordis).
 // Builds a fake connection service + ctx, calls apply(), and drives the routes.
 // Run from anywhere: node test/host.mjs
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { join, resolve as resolvePath } from 'node:path'
+
+/** Read a small file back as utf8 for content assertions. */
+const readBack = (path) => readFileSync(path, 'utf8')
 
 const ROOT = join(import.meta.dirname, '..')
 const TMP = join(ROOT, '_dsha_test_root')
@@ -250,6 +253,98 @@ const routes4 = new Map()
 const conn4 = { fetch: { register: (r) => { routes4.set(r.path, r); return () => {} } } }
 mod.apply({ get: (k) => (k === 'connection' ? conn4 : undefined), effect() {}, fiber: { entry: { id: 'x' } } }, {})
 check('default root auto-created', existsSync(AUTO_ROOT), AUTO_ROOT)
+
+// --- recycle bin -----------------------------------------------------------------
+
+const drive2 = async (path, request) => {
+  const route = routes.get(path.split('?')[0])
+  if (route === undefined) throw new Error(`route not registered: ${path}`)
+  return route.fetch(new Request(new URL(`http://local.test${path}`), request))
+}
+const BIN = join(TMP, '.dsh-artifacts-trash')
+
+// 22. trash moves the entry out of sight and records where it came from
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'trash', path: 'hello.txt' }),
+})
+body = await res.json()
+check('trash ok', body.ok === true && body.originalRel === 'hello.txt', JSON.stringify(body))
+check('entry left its spot', !existsSync(join(TMP, 'hello.txt')))
+check('entry sits in bin', existsSync(join(BIN, body.trashName, 'hello.txt')))
+res = await drive2('/api/dsh-artifacts.trash', { method: 'GET' })
+body = await res.json()
+check('bin lists with meta', body.ok === true && body.entries.length === 1
+  && body.entries[0].originalRel === 'hello.txt' && typeof body.entries[0].deletedAt === 'number', JSON.stringify(body).slice(0, 240))
+check('bin hidden from listing', (await (await drive2('/api/dsh-artifacts.list', { method: 'GET' })).json())
+  .entries.every((e) => e.name !== '.dsh-artifacts-trash'))
+check('bin hidden from search', (await (await drive2('/api/dsh-artifacts.search?query=trash', { method: 'GET' })).json()).count === 0)
+
+// 23. binning something already in the bin is refused
+const inBin = body.entries[0].name
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'trash', path: `.dsh-artifacts-trash/${inBin}` }),
+})
+check('re-trash refused', res.status === 400 && (await res.json()).code === 'in-trash')
+
+// 24. restore puts it back exactly where it came from
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'restore', path: `.dsh-artifacts-trash/${inBin}` }),
+})
+body = await res.json()
+check('restore ok', body.ok === true && body.path === 'hello.txt', JSON.stringify(body))
+check('restored content intact', existsSync(join(TMP, 'hello.txt')) && readBack(join(TMP, 'hello.txt')) === '你好，产物！')
+check('bin entry consumed', (await (await drive2('/api/dsh-artifacts.trash', { method: 'GET' })).json()).entries.length === 0)
+
+// 25. restore onto a live file gains a numeric suffix, never overwrites
+await drive2('/api/dsh-artifacts.action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'trash', path: 'hello.txt' }) })
+let binNow = (await (await drive2('/api/dsh-artifacts.trash', { method: 'GET' })).json()).entries[0].name
+// Recreate a live file at the exact origin: restoring must never overwrite it.
+writeFileSync(join(TMP, 'hello.txt'), 'live version')
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'restore', path: `.dsh-artifacts-trash/${binNow}` }),
+})
+body = await res.json()
+check('collision restored with suffix', body.ok === true && body.path === 'hello (1).txt', JSON.stringify(body))
+check('live file untouched', readBack(join(TMP, 'hello.txt')) === 'live version')
+check('restored copy intact', readBack(join(TMP, 'hello (1).txt')) === '你好，产物！')
+
+// 26. a forged origin pointing outside the root is refused on restore
+binNow = (await (async () => {
+  await drive2('/api/dsh-artifacts.action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'trash', path: 'hello (1).txt' }) })
+  return (await (await drive2('/api/dsh-artifacts.trash', { method: 'GET' })).json()).entries[0].name
+})())
+const { writeFile: writeProm, readFile: readProm } = await import('node:fs/promises')
+await writeProm(join(BIN, binNow, 'meta.json'), JSON.stringify({ originalRel: '../outside-secret', deletedAt: Date.now() }), 'utf8')
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'restore', path: `.dsh-artifacts-trash/${binNow}` }),
+})
+check('forged origin refused', res.status === 403, `status=${res.status}`)
+
+// 27. purge kills one entry permanently; empty-trash clears the rest
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'purge', path: `.dsh-artifacts-trash/${binNow}` }),
+})
+check('purge ok', (await res.json()).ok === true)
+await drive2('/api/dsh-artifacts.action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'trash', path: 'hello.txt' }) })
+res = await drive2('/api/dsh-artifacts.action', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'empty-trash', path: '' }),
+})
+check('empty-trash ok', (await res.json()).ok === true)
+check('bin dir gone or empty', !existsSync(BIN) || (await (await drive2('/api/dsh-artifacts.trash', { method: 'GET' })).json()).entries.length === 0)
 
 rmSync(TMP, { recursive: true, force: true })
 rmSync(OUTSIDE, { force: true })

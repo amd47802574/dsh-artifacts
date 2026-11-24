@@ -56,6 +56,24 @@ window.__ModuleLoader__.load({
       'action.toggleCode': '隐藏代码与脚本',
       'action.showCode': '显示代码与脚本',
       'hint.codeHidden': '已隐藏 {n} 个代码 / 脚本文件',
+      'trash.title': '回收站',
+      'trash.open': '回收站',
+      'trash.back': '返回产物',
+      'trash.empty.title': '回收站是空的',
+      'trash.empty.hint': '删除的产物会先进入这里，可随时恢复',
+      'trash.restore': '恢复',
+      'trash.purge': '彻底删除',
+      'trash.purge.confirm': '将永久删除「{name}」，此操作不可恢复。',
+      'trash.empty.button': '清空回收站',
+      'trash.empty.confirm': '将永久删除回收站中的全部 {n} 项，此操作不可恢复。',
+      'trash.column.where': '原位置',
+      'trash.column.when': '删除时间',
+      'trash.restored': '已恢复到 {path}',
+      'trash.purged': '已彻底删除 {name}',
+      'trash.emptied': '回收站已清空',
+      'confirm.trash.title': '移入回收站',
+      'confirm.trash.body.file': '将把文件「{name}」移入回收站，可随时恢复。',
+      'confirm.trash.body.dir': '将把文件夹「{name}」及其全部内容移入回收站，可随时恢复。',
       'filter.label': '搜索',
       'filter.placeholder': '搜索产物名…',
       'search.label': '搜索',
@@ -146,6 +164,24 @@ window.__ModuleLoader__.load({
       'action.toggleCode': 'Hide code and scripts',
       'action.showCode': 'Show code and scripts',
       'hint.codeHidden': '{n} code / script files hidden',
+      'trash.title': 'Recycle bin',
+      'trash.open': 'Recycle bin',
+      'trash.back': 'Back to artifacts',
+      'trash.empty.title': 'The recycle bin is empty',
+      'trash.empty.hint': 'Deleted artifacts land here first and can be restored any time',
+      'trash.restore': 'Restore',
+      'trash.purge': 'Delete permanently',
+      'trash.purge.confirm': '"{name}" will be deleted permanently. This cannot be undone.',
+      'trash.empty.button': 'Empty recycle bin',
+      'trash.empty.confirm': 'All {n} entries in the recycle bin will be deleted permanently. This cannot be undone.',
+      'trash.column.where': 'Original location',
+      'trash.column.when': 'Deleted at',
+      'trash.restored': 'Restored to {path}',
+      'trash.purged': 'Permanently deleted {name}',
+      'trash.emptied': 'Recycle bin emptied',
+      'confirm.trash.title': 'Move to recycle bin',
+      'confirm.trash.body.file': 'The file "{name}" will be moved to the recycle bin and can be restored any time.',
+      'confirm.trash.body.dir': 'The folder "{name}" and everything inside it will be moved to the recycle bin and can be restored any time.',
       'filter.label': 'Search',
       'filter.placeholder': 'Search artifact names…',
       'search.label': 'Search',
@@ -373,6 +409,18 @@ window.__ModuleLoader__.load({
         const error = new Error(body?.error ?? `HTTP ${response.status}`)
         error.code = body?.code
         error.status = response.status
+        throw error
+      }
+      return body
+    }
+
+    /** The recycle bin, newest deletions first. */
+    async function fetchTrash() {
+      const response = await fetch(new URL(`${API}.trash`, window.location.origin), { method: 'GET' })
+      const body = await response.json().catch(() => undefined)
+      if (!response.ok || body?.ok !== true) {
+        const error = new Error(body?.error ?? `HTTP ${response.status}`)
+        error.code = body?.code
         throw error
       }
       return body
@@ -1041,6 +1089,10 @@ window.__ModuleLoader__.load({
       const [hideCode, setHideCode] = useState(() => {
         try { return window.localStorage.getItem(HIDE_CODE_KEY) === '1' } catch { return false }
       })
+      const [trashOpen, setTrashOpen] = useState(false)
+      const [trashData, setTrashData] = useState(null)
+      const [trashLoading, setTrashLoading] = useState(false)
+      const [trashError, setTrashError] = useState(null)
       const [filter, setFilter] = useState('')
       const [search, setSearch] = useState(null)
       const [searchLoading, setSearchLoading] = useState(false)
@@ -1247,7 +1299,7 @@ window.__ModuleLoader__.load({
       }, [])
 
       const askDelete = useCallback((entry, child) => {
-        setDialog({ kind: 'delete', entry, path: child })
+        setDialog({ kind: 'trash', entry, path: child })
       }, [])
 
       const askMkdir = useCallback(() => {
@@ -1257,6 +1309,67 @@ window.__ModuleLoader__.load({
       const askSettings = useCallback(() => {
         setDialog({ kind: 'settings' })
       }, [])
+
+      // --- recycle bin ----------------------------------------------------------
+
+      const loadTrash = useCallback(async () => {
+        setTrashLoading(true)
+        setTrashError(null)
+        try {
+          const result = await fetchTrash()
+          setTrashData(result)
+        } catch (cause) {
+          setTrashData(null)
+          setTrashError(cause instanceof Error ? cause.message : String(cause))
+        } finally {
+          setTrashLoading(false)
+        }
+      }, [])
+
+      const openTrash = useCallback(() => {
+        setTrashOpen(true)
+        void loadTrash()
+      }, [loadTrash])
+
+      const closeTrash = useCallback(() => {
+        setTrashOpen(false)
+        setTrashData(null)
+        setTrashError(null)
+      }, [])
+
+      const trashEntryPath = useCallback((entryName) => `.dsh-artifacts-trash/${entryName}`, [])
+
+      const restoreFromTrash = useCallback(async (entry) => {
+        try {
+          const result = await postAction({ action: 'restore', path: trashEntryPath(entry.name) })
+          showToast(interpolate(t('trash.restored'), { path: result.path }))
+          void loadTrash()
+          void load(pathRef.current)
+        } catch (cause) {
+          reportFailure(cause)
+        }
+      }, [t, showToast, loadTrash, load, reportFailure, trashEntryPath])
+
+      const purgeFromTrash = useCallback(async (entry) => {
+        try {
+          await postAction({ action: 'purge', path: trashEntryPath(entry.name) })
+          showToast(interpolate(t('trash.purged'), { name: entry.originalRel }))
+          void loadTrash()
+        } catch (cause) {
+          reportFailure(cause)
+        }
+      }, [t, showToast, loadTrash, reportFailure, trashEntryPath])
+
+      const emptyTrash = useCallback(async () => {
+        try {
+          await postAction({ action: 'empty-trash', path: '' })
+          showToast(t('trash.emptied'))
+          void loadTrash()
+          void load(pathRef.current)
+        } catch (cause) {
+          reportFailure(cause)
+        }
+      }, [t, showToast, loadTrash, load, reportFailure])
 
       const dismissDialog = useCallback(() => setDialog(null), [])
 
@@ -1277,9 +1390,9 @@ window.__ModuleLoader__.load({
           } else if (current.kind === 'mkdir') {
             await postAction({ action: 'mkdir', path: pathRef.current, name: value })
             showToast(interpolate(t('notice.created'), { name: value }))
-          } else if (current.kind === 'delete') {
-            await postAction({ action: 'delete', path: current.path })
-            showToast(interpolate(t('notice.deleted'), { name: current.entry.name }))
+          } else if (current.kind === 'trash') {
+            await postAction({ action: 'trash', path: current.path })
+            showToast(interpolate(t('confirm.trash.title'), { }) + '：' + current.entry.name)
           }
           setDialog(null)
           if (searchRef.current !== '') void runSearch(searchRef.current)
@@ -1312,6 +1425,7 @@ window.__ModuleLoader__.load({
             ] }),
             jsxs('div', { className: 'dsha-header-actions', children: [
               jsx('button', { className: 'dsha-btn', onClick: askSettings, title: t('settings.title'), 'aria-label': t('settings.title'), children: '⚙' }),
+              jsx('button', { className: 'dsha-btn', onClick: openTrash, title: t('trash.open'), 'aria-label': t('trash.open'), children: '🗑' }),
               jsx('button', {
                 className: 'dsha-btn', onClick: () => changeHideCode(!hideCode),
                 title: hideCode ? t('action.showCode') : t('action.toggleCode'),
@@ -1362,6 +1476,71 @@ window.__ModuleLoader__.load({
         ] }),
         jsxs('div', { className: 'dsha-body', children: [
           (() => {
+            if (trashOpen) {
+              return jsxs(Fragment, {
+                children: [
+                  jsxs('div', { className: 'dsha-search-band', children: [
+                    jsx('span', { className: 'dsha-stat-pill', children: `🗑 ${t('trash.title')}` }),
+                    (trashData?.entries ?? []).length > 0 ? jsx('button', {
+                      className: 'dsha-btn dsha-btn-danger',
+                      onClick: () => { if (window.confirm(interpolate(t('trash.empty.confirm'), { n: trashData.entries.length }))) void emptyTrash() },
+                      children: `🧹 ${t('trash.empty.button')}`,
+                    }) : null,
+                    jsx('button', { className: 'dsha-btn', style: { marginLeft: 'auto' }, onClick: closeTrash, children: `↩ ${t('trash.back')}` }),
+                  ] }),
+                  (() => {
+                    if (trashLoading) {
+                      return jsx('div', { className: 'dsha-skeleton-list', children: [0, 1, 2, 3].map((n) => jsx('div', { className: 'dsha-skeleton-row' }, n)) })
+                    }
+                    if (trashError !== null) {
+                      return jsxs('div', { className: 'dsha-state', children: [
+                        jsx('div', { className: 'dsha-empty-emoji', children: '🧯' }),
+                        jsx('div', { className: 'dsha-empty-title dsha-error', children: t('error.title') }),
+                        jsx('div', { className: 'dsha-empty-hint', children: trashError }),
+                        jsx('button', { className: 'dsha-btn dsha-btn-primary', onClick: () => void loadTrash(), children: `⟳ ${t('action.retry')}` }),
+                      ] })
+                    }
+                    const binEntries = trashData?.entries ?? []
+                    if (binEntries.length === 0) {
+                      return jsxs('div', { className: 'dsha-state', children: [
+                        jsx('div', { className: 'dsha-empty-emoji', children: '🗑️' }),
+                        jsx('div', { className: 'dsha-empty-title', children: t('trash.empty.title') }),
+                        jsx('div', { className: 'dsha-empty-hint', children: t('trash.empty.hint') }),
+                      ] })
+                    }
+                    return jsx('div', { className: 'dsha-list', children: binEntries.map((entry) => {
+                      const kind = kindOf(entry)
+                      const art = KIND_ART[kind]
+                      return jsxs('div', {
+                        className: 'dsha-row',
+                        style: { '--dsha-glow': art.glow, gridTemplateColumns: 'minmax(0,1fr) 132px auto' },
+                        children: [
+                          jsxs('div', { className: 'dsha-row-name', children: [
+                            jsx('span', { className: 'dsha-row-glyph', style: { background: art.glow }, children: art.emoji }),
+                            jsxs('span', { className: 'dsha-row-title', children: [
+                              jsx('span', { className: 'dsha-row-name-text', title: entry.originalRel, children: entry.originalRel }),
+                              jsx('span', { className: 'dsha-row-kind', children: entry.type === 'directory' ? 'DIR' : formatSize(entry.size) }),
+                            ] }),
+                          ] }),
+                          jsx('div', { className: 'dsha-row-num', children: formatTime(entry.deletedAt) }),
+                          jsxs('div', { className: 'dsha-row-actions', style: { opacity: 1 }, children: [
+                            jsx('button', {
+                              className: 'dsha-icon-btn', title: t('trash.restore'), 'aria-label': `${t('trash.restore')}: ${entry.originalRel}`,
+                              onClick: () => void restoreFromTrash(entry), children: '↩',
+                            }),
+                            jsx('button', {
+                              className: 'dsha-icon-btn', title: t('trash.purge'), 'aria-label': `${t('trash.purge')}: ${entry.originalRel}`,
+                              onClick: () => { if (window.confirm(interpolate(t('trash.purge.confirm'), { name: entry.originalRel }))) void purgeFromTrash(entry) },
+                              children: '🔥',
+                            }),
+                          ] }),
+                        ],
+                      }, entry.name)
+                    }) })
+                  })(),
+                ],
+              })
+            }
             if (searchActive) {
               const query = filter.trim()
               if (searchLoading) {
@@ -1474,18 +1653,18 @@ window.__ModuleLoader__.load({
           onSave: saveRoot,
           onDismiss: dismissDialog,
         }) : null,
-        dialog?.kind === 'delete' ? jsx(Modal, {
-          title: `🗑 ${t('confirm.delete.title')}`, danger: true, onDismiss: dismissDialog,
+        dialog?.kind === 'trash' ? jsx(Modal, {
+          title: `🗑 ${t('confirm.trash.title')}`, danger: false, onDismiss: dismissDialog,
           autoFocusSelector: '.dsha-btn-danger',
           children: jsxs(Fragment, {
             children: [
               jsx('div', { className: 'dsha-modal-body', children: interpolate(
-                dialog.entry.type === 'directory' ? t('confirm.delete.body.dir') : t('confirm.delete.body.file'),
+                dialog.entry.type === 'directory' ? t('confirm.trash.body.dir') : t('confirm.trash.body.file'),
                 { name: dialog.entry.name },
               ) }),
               jsxs('div', { className: 'dsha-modal-actions', children: [
                 jsx('button', { className: 'dsha-btn', onClick: dismissDialog, children: t('action.cancel') }),
-                jsx('button', { className: 'dsha-btn dsha-btn-danger', onClick: () => void confirmDialog(), children: `🗑 ${t('action.delete')}` }),
+                jsx('button', { className: 'dsha-btn dsha-btn-primary', onClick: () => void confirmDialog(), children: `🗑 ${t('confirm.trash.title')}` }),
               ] }),
             ],
           }),
